@@ -21,7 +21,7 @@ restricted_zone = config["restricted_zone"]
 
 
 # --------------------------------------------------
-# POSITION CALCULATIONS
+# BASIC CALCULATIONS
 # --------------------------------------------------
 
 def calculate_center(x1, y1, x2, y2):
@@ -42,22 +42,20 @@ def calculate_distance(previous_position, current_position):
 
 
 # --------------------------------------------------
-# SAFETY EVENT CREATION
+# EVENT CREATION
 # --------------------------------------------------
 
 def create_event(track_id, event_type, reason, timestamp=None):
-    event = {
+    return {
         "track_id": track_id,
         "event": event_type,
         "reason": reason,
         "timestamp": timestamp
     }
 
-    return event
-
 
 # --------------------------------------------------
-# RESTRICTED ZONE DETECTION
+# RESTRICTED ZONE CHECK
 # --------------------------------------------------
 
 def is_inside_restricted_zone(position, zone):
@@ -71,7 +69,7 @@ def is_inside_restricted_zone(position, zone):
 
 
 # --------------------------------------------------
-# LOITERING DETECTION
+# LOITERING CHECK
 # --------------------------------------------------
 
 def check_loitering(track_id, positions, timestamps):
@@ -108,7 +106,7 @@ def check_loitering(track_id, positions, timestamps):
 
 
 # --------------------------------------------------
-# UNUSUAL MOVEMENT DETECTION
+# UNUSUAL MOVEMENT CHECK
 # --------------------------------------------------
 
 def check_unusual_movement(
@@ -123,7 +121,6 @@ def check_unusual_movement(
     )
 
     if movement > config["movement_threshold"]:
-
         return create_event(
             track_id,
             "Unusual Movement",
@@ -134,7 +131,7 @@ def check_unusual_movement(
 
 
 # --------------------------------------------------
-# TRACKING → BEHAVIOUR INTEGRATION
+# MAIN BEHAVIOUR ANALYSIS
 # --------------------------------------------------
 
 def process_tracking_data(detections, timestamp, history):
@@ -143,13 +140,13 @@ def process_tracking_data(detections, timestamp, history):
 
     for detection in detections:
 
-        # Get Track ID from Person 2
         track_id = detection["track_id"]
-
-        # Get bounding box from Person 1/Person 2
         box = detection["box"]
 
-        # Calculate centre of the person
+        # ------------------------------------------
+        # Calculate person's center
+        # ------------------------------------------
+
         center = calculate_center(
             box[0],
             box[1],
@@ -157,27 +154,42 @@ def process_tracking_data(detections, timestamp, history):
             box[3]
         )
 
-        # Create history for a new person
+        # ------------------------------------------
+        # Create history for new person
+        # ------------------------------------------
+
         if track_id not in history:
 
             history[track_id] = {
                 "positions": [],
-                "timestamps": []
+                "timestamps": [],
+                "inside_zone": False,
+                "restricted_zone_reported": False,
+                "loitering_reported": False
             }
 
-        # Store current position
-        history[track_id]["positions"].append(center)
+        # ------------------------------------------
+        # Store position and timestamp
+        # ------------------------------------------
 
-        # Store current timestamp
+        history[track_id]["positions"].append(center)
         history[track_id]["timestamps"].append(timestamp)
 
-        # --------------------------------------------------
-        # CHECK 1: RESTRICTED ZONE
-        # --------------------------------------------------
+        # ------------------------------------------
+        # Restricted zone detection
+        # ------------------------------------------
 
-        if is_inside_restricted_zone(
+        inside_zone = is_inside_restricted_zone(
             center,
             restricted_zone
+        )
+
+        previously_inside = history[track_id]["inside_zone"]
+
+        if (
+            inside_zone
+            and not previously_inside
+            and not history[track_id]["restricted_zone_reported"]
         ):
 
             event = create_event(
@@ -189,22 +201,33 @@ def process_tracking_data(detections, timestamp, history):
 
             events.append(event)
 
-        # --------------------------------------------------
-        # CHECK 2: LOITERING
-        # --------------------------------------------------
+            # Report only once for this track
+            history[track_id]["restricted_zone_reported"] = True
 
-        event = check_loitering(
-            track_id,
-            history[track_id]["positions"],
-            history[track_id]["timestamps"]
-        )
+        # Update current zone status
+        history[track_id]["inside_zone"] = inside_zone
 
-        if event:
-            events.append(event)
+        # ------------------------------------------
+        # Loitering detection
+        # ------------------------------------------
 
-        # --------------------------------------------------
-        # CHECK 3: UNUSUAL MOVEMENT
-        # --------------------------------------------------
+        if not history[track_id]["loitering_reported"]:
+
+            event = check_loitering(
+                track_id,
+                history[track_id]["positions"],
+                history[track_id]["timestamps"]
+            )
+
+            if event:
+                events.append(event)
+
+                # Report loitering only once
+                history[track_id]["loitering_reported"] = True
+
+        # ------------------------------------------
+        # Unusual movement detection
+        # ------------------------------------------
 
         positions = history[track_id]["positions"]
 
@@ -225,239 +248,50 @@ def process_tracking_data(detections, timestamp, history):
     return events
 
 
-# ==================================================
-# TESTING
-# ==================================================
+# --------------------------------------------------
+# BASIC TESTING
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
-    print("\n--- BEHAVIOUR TESTING ---")
+    print("Testing behaviour analysis...")
 
-    # --------------------------------------------------
-    # Test 1: Centre Calculation
-    # --------------------------------------------------
-
+    # Test center
     center = calculate_center(
-        100,
-        100,
-        200,
-        200
+        10, 20, 30, 40
     )
 
-    print("\n1. Centre Calculation")
-    print("Centre:", center)
+    print("Center:", center)
 
-
-    # --------------------------------------------------
-    # Test 2: Distance Calculation
-    # --------------------------------------------------
-
+    # Test distance
     distance = calculate_distance(
-        (100, 100),
-        (200, 200)
+        (10, 20),
+        (20, 30)
     )
 
-    print("\n2. Distance Calculation")
     print("Distance:", distance)
 
+    # Test restricted zone
+    test_position = (
+        (restricted_zone["x1"] + restricted_zone["x2"]) / 2,
+        (restricted_zone["y1"] + restricted_zone["y2"]) / 2
+    )
 
-    # --------------------------------------------------
-    # Test 3: Restricted Zone
-    # --------------------------------------------------
-
-    person_position = (250, 200)
-
-    print("\n3. Restricted Zone")
-
-    if is_inside_restricted_zone(
-        person_position,
+    inside = is_inside_restricted_zone(
+        test_position,
         restricted_zone
-    ):
-
-        print(
-            "SAFETY EVENT: "
-            "Person entered restricted zone"
-        )
-
-    else:
-
-        print(
-            "NORMAL: "
-            "Person is outside restricted zone"
-        )
-
-
-    # --------------------------------------------------
-    # Test 4: Loitering
-    # --------------------------------------------------
-
-    positions = [
-        (250, 200),
-        (252, 201),
-        (251, 202),
-        (250, 201)
-    ]
-
-    timestamps = [
-        0,
-        10,
-        20,
-        30
-    ]
-
-    print("\n4. Time Based Loitering Test")
-
-    event = check_loitering(
-        track_id=3,
-        positions=positions,
-        timestamps=timestamps
     )
 
-    if event:
+    print("Inside restricted zone:", inside)
 
-        print("\nSafety Event:")
-        print("Track ID:", event["track_id"])
-        print("Event:", event["event"])
-        print("Reason:", event["reason"])
-        print("Timestamp:", event["timestamp"])
-
-    else:
-
-        print("No loitering detected")
-
-
-    # --------------------------------------------------
-    # Test 5: Unusual Movement
-    # --------------------------------------------------
-
-    previous_position = (100, 100)
-    current_position = (300, 300)
-
-    print("\n5. Unusual Movement Test")
-
-    event = check_unusual_movement(
-        track_id=5,
-        previous_position=previous_position,
-        current_position=current_position
+    # Test event
+    event = create_event(
+        1,
+        "Test Event",
+        "Testing behaviour module",
+        5.0
     )
 
-    if event:
+    print("Test event:", event)
 
-        print("\nSafety Event:")
-        print("Track ID:", event["track_id"])
-        print("Event:", event["event"])
-        print("Reason:", event["reason"])
-
-    else:
-
-        print("Normal movement")
-
-
-    # --------------------------------------------------
-    # Test 6: Tracking → Behaviour Integration
-    # --------------------------------------------------
-
-    print("\n6. Tracking → Behaviour Integration Test")
-
-    # Example output coming from Person 2
-    detections = [
-        {
-            "box": [250, 200, 270, 220],
-            "track_id": 3
-        }
-    ]
-
-    history = {}
-
-    events = process_tracking_data(
-        detections,
-        timestamp=0,
-        history=history
-    )
-
-    print("\nTracking data:")
-    print(detections)
-
-    print("\nBehaviour events:")
-
-    if events:
-
-        for event in events:
-
-            print("Track ID:", event["track_id"])
-            print("Event:", event["event"])
-            print("Reason:", event["reason"])
-            print("Timestamp:", event["timestamp"])
-
-    else:
-
-        print("No safety event")
-
-
-    # --------------------------------------------------
-    # Test 7: Multiple Time-Based Tracking
-    # --------------------------------------------------
-
-    print("\n7. Multiple Person Time-Based Test")
-
-    people = {
-
-        1: {
-            "positions": [
-                (50, 50),
-                (80, 80),
-                (120, 120)
-            ],
-            "timestamps": [
-                0,
-                10,
-                20
-            ]
-        },
-
-        2: {
-            "positions": [
-                (250, 200),
-                (251, 201),
-                (252, 200)
-            ],
-            "timestamps": [
-                0,
-                10,
-                20
-            ]
-        },
-
-        3: {
-            "positions": [
-                (150, 150),
-                (155, 152),
-                (160, 155)
-            ],
-            "timestamps": [
-                0,
-                10,
-                30
-            ]
-        }
-    }
-
-    for track_id, person in people.items():
-
-        event = check_loitering(
-            track_id,
-            person["positions"],
-            person["timestamps"]
-        )
-
-        print("\nTrack ID:", track_id)
-
-        if event:
-
-            print("Event:", event["event"])
-            print("Reason:", event["reason"])
-            print("Timestamp:", event["timestamp"])
-
-        else:
-
-            print("Event: Normal movement")
+    print("Behaviour tests completed!")

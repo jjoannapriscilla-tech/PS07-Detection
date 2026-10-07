@@ -1,5 +1,8 @@
 import cv2
 import tempfile
+import subprocess
+import os
+import imageio_ffmpeg
 
 from src.detection import detect_objects
 from src.tracking import PersonTracker
@@ -21,20 +24,26 @@ def process_video(input_path):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    output_file = tempfile.NamedTemporaryFile(
+    # Temporary OpenCV video
+    temp_video = tempfile.NamedTemporaryFile(
         delete=False,
         suffix=".mp4"
     )
-    output_path = output_file.name
-    output_file.close()
+    temp_video_path = temp_video.name
+    temp_video.close()
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
     writer = cv2.VideoWriter(
-        output_path,
+        temp_video_path,
         fourcc,
         fps,
         (width, height)
     )
+
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError("Could not create output video")
 
     tracker = PersonTracker()
     history = {}
@@ -50,17 +59,15 @@ def process_video(input_path):
             break
 
         frame_number += 1
-
         timestamp = frame_number / fps
 
         # Detection
         detections = detect_objects(frame)
 
-        # Keep only persons
+        # Keep only people
         person_detections = [
-            detection
-            for detection in detections
-            if detection["class"] == "person"
+            d for d in detections
+            if d["class"] == "person"
         ]
 
         # Tracking
@@ -75,7 +82,7 @@ def process_video(input_path):
 
         all_events.extend(events)
 
-        # Draw results
+        # Draw tracking results
         for detection in tracked:
 
             x1, y1, x2, y2 = detection["box"]
@@ -103,5 +110,40 @@ def process_video(input_path):
 
     cap.release()
     writer.release()
+
+    # Convert to browser-friendly H.264 MP4
+    output_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".mp4"
+    )
+    output_path = output_file.name
+    output_file.close()
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        temp_video_path,
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        output_path
+    ]
+
+    subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True
+    )
+
+    # Remove temporary OpenCV video
+    if os.path.exists(temp_video_path):
+        os.remove(temp_video_path)
 
     return output_path, all_events
