@@ -1,11 +1,5 @@
 {
-    "restricted_zone": {
-        "x1": 250,
-        "y1": 150,
-        "x2": 550,
-        "y2": 350
-    },
-    "loitering_time": 10,
-    "loitering_radius": 50,
+    "loitering_time": 45,
+    "loitering_radius": 40,
     "movement_threshold": 100
 }

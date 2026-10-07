@@ -3,161 +3,182 @@ import math
 from pathlib import Path
 
 
-# --------------------------------------------------
-# CONFIGURATION
-# --------------------------------------------------
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = BASE_DIR / "config" / "zones.json"
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "zones.json"
 
 
 def load_config():
+    """
+    Load behaviour settings from zones.json.
+    """
+
     with open(CONFIG_PATH, "r") as file:
         return json.load(file)
 
 
-config = load_config()
-restricted_zone = config["restricted_zone"]
+CONFIG = load_config()
 
 
-# --------------------------------------------------
-# BASIC CALCULATIONS
-# --------------------------------------------------
+def calculate_center(box):
+    """
+    Calculate the center point of a bounding box.
+    """
 
-def calculate_center(x1, y1, x2, y2):
+    x1, y1, x2, y2 = box
+
     center_x = (x1 + x2) / 2
     center_y = (y1 + y2) / 2
 
     return center_x, center_y
 
 
-def calculate_distance(previous_position, current_position):
-    x1, y1 = previous_position
-    x2, y2 = current_position
+def calculate_distance(point1, point2):
+    """
+    Calculate Euclidean distance between two points.
+    """
 
     return math.sqrt(
-        (x2 - x1) ** 2 +
-        (y2 - y1) ** 2
+        (point1[0] - point2[0]) ** 2
+        +
+        (point1[1] - point2[1]) ** 2
     )
 
 
-# --------------------------------------------------
-# EVENT CREATION
-# --------------------------------------------------
+def create_event(track_id, event, reason, timestamp):
+    """
+    Create a behaviour event.
+    """
 
-def create_event(track_id, event_type, reason, timestamp=None):
     return {
         "track_id": track_id,
-        "event": event_type,
+        "event": event,
         "reason": reason,
         "timestamp": timestamp
     }
 
 
-# --------------------------------------------------
-# RESTRICTED ZONE CHECK
-# --------------------------------------------------
-
 def is_inside_restricted_zone(position, zone):
+    """
+    Check whether a person's center point is inside
+    the selected rectangular restricted zone.
+    """
+
+    if zone is None:
+        return False
+
+    x1 = min(zone["x1"], zone["x2"])
+    x2 = max(zone["x1"], zone["x2"])
+
+    y1 = min(zone["y1"], zone["y2"])
+    y2 = max(zone["y1"], zone["y2"])
+
     x, y = position
 
     return (
-        zone["x1"] <= x <= zone["x2"]
+        x1 <= x <= x2
         and
-        zone["y1"] <= y <= zone["y2"]
+        y1 <= y <= y2
     )
 
 
-# --------------------------------------------------
-# LOITERING CHECK
-# --------------------------------------------------
+def check_loitering(track_history, current_time):
+    """
+    Determine whether a person is loitering.
 
-def check_loitering(track_id, positions, timestamps):
+    A person is considered loitering only when:
 
-    if not positions or not timestamps:
-        return None
+    1. They have been continuously tracked for a long time.
+    2. Their total movement remains very small.
+    3. They stay within a small area.
+    4. The minimum loitering time is reached.
 
-    start_position = positions[0]
-    current_position = positions[-1]
+    This prevents a person who simply appears for a few seconds
+    or moves normally from being classified as loitering.
+    """
 
-    start_time = timestamps[0]
-    current_time = timestamps[-1]
+    loitering_time = CONFIG.get("loitering_time", 45)
+    loitering_radius = CONFIG.get("loitering_radius", 40)
 
-    time_spent = current_time - start_time
+    timestamps = track_history["timestamps"]
+    positions = track_history["positions"]
 
-    movement = calculate_distance(
-        start_position,
-        current_position
-    )
+    if len(timestamps) < 2:
+        return False
 
-    if (
-        time_spent >= config["loitering_time"]
-        and
-        movement <= config["loitering_radius"]
-    ):
-        return create_event(
-            track_id,
-            "Loitering",
-            "Person remained in approximately the same area for too long",
-            current_time
+    time_spent = timestamps[-1] - timestamps[0]
+
+    if time_spent < loitering_time:
+        return False
+
+    # Compare every recorded position with the first position.
+    max_distance = 0
+
+    first_position = positions[0]
+
+    for position in positions:
+        distance = calculate_distance(
+            first_position,
+            position
         )
 
-    return None
+        max_distance = max(
+            max_distance,
+            distance
+        )
+
+    # The person must remain inside a small movement radius.
+    if max_distance <= loitering_radius:
+        return True
+
+    return False
 
 
-# --------------------------------------------------
-# UNUSUAL MOVEMENT CHECK
-# --------------------------------------------------
+def check_unusual_movement(track_history):
+    """
+    Detect unusually large movement between consecutive observations.
+    """
 
-def check_unusual_movement(
-    track_id,
-    previous_position,
-    current_position
-):
+    movement_threshold = CONFIG.get(
+        "movement_threshold",
+        100
+    )
+
+    positions = track_history["positions"]
+
+    if len(positions) < 2:
+        return False
+
+    previous_position = positions[-2]
+    current_position = positions[-1]
 
     movement = calculate_distance(
         previous_position,
         current_position
     )
 
-    if movement > config["movement_threshold"]:
-        return create_event(
-            track_id,
-            "Unusual Movement",
-            "Person moved an unusually large distance"
-        )
-
-    return None
+    return movement > movement_threshold
 
 
-# --------------------------------------------------
-# MAIN BEHAVIOUR ANALYSIS
-# --------------------------------------------------
-
-def process_tracking_data(detections, timestamp, history):
+def process_tracking_data(
+    detections,
+    timestamp,
+    history,
+    restricted_zone=None
+):
+    """
+    Analyse tracked people and generate behaviour events.
+    """
 
     events = []
 
     for detection in detections:
 
         track_id = detection["track_id"]
-        box = detection["box"]
 
-        # ------------------------------------------
-        # Calculate person's center
-        # ------------------------------------------
-
-        center = calculate_center(
-            box[0],
-            box[1],
-            box[2],
-            box[3]
+        position = calculate_center(
+            detection["box"]
         )
 
-        # ------------------------------------------
-        # Create history for new person
-        # ------------------------------------------
-
+        # Create history for a new person.
         if track_id not in history:
 
             history[track_id] = {
@@ -168,130 +189,98 @@ def process_tracking_data(detections, timestamp, history):
                 "loitering_reported": False
             }
 
-        # ------------------------------------------
-        # Store position and timestamp
-        # ------------------------------------------
+        track_history = history[track_id]
 
-        history[track_id]["positions"].append(center)
-        history[track_id]["timestamps"].append(timestamp)
+        # Store position and timestamp.
+        track_history["positions"].append(position)
+        track_history["timestamps"].append(timestamp)
 
-        # ------------------------------------------
-        # Restricted zone detection
-        # ------------------------------------------
+        # Keep only recent history.
+        # This prevents memory from growing forever.
+        max_history = 300
+
+        if len(track_history["positions"]) > max_history:
+
+            track_history["positions"] = (
+                track_history["positions"][-max_history:]
+            )
+
+            track_history["timestamps"] = (
+                track_history["timestamps"][-max_history:]
+            )
+
+        # -------------------------------------------------
+        # RESTRICTED AREA
+        # -------------------------------------------------
 
         inside_zone = is_inside_restricted_zone(
-            center,
+            position,
             restricted_zone
         )
 
-        previously_inside = history[track_id]["inside_zone"]
+        previously_inside = track_history["inside_zone"]
 
+        # Report only when the person ENTERS the zone.
         if (
             inside_zone
             and not previously_inside
-            and not history[track_id]["restricted_zone_reported"]
+            and not track_history["restricted_zone_reported"]
         ):
 
-            event = create_event(
-                track_id,
-                "Restricted Area Entry",
-                "Person entered restricted zone",
+            events.append(
+                create_event(
+                    track_id,
+                    "Restricted Area Entry",
+                    "Person entered restricted zone",
+                    timestamp
+                )
+            )
+
+            track_history["restricted_zone_reported"] = True
+
+        # When the person leaves the zone,
+        # allow another entry event later.
+        if not inside_zone:
+
+            track_history["restricted_zone_reported"] = False
+
+        track_history["inside_zone"] = inside_zone
+
+        # -------------------------------------------------
+        # LOITERING
+        # -------------------------------------------------
+
+        if not track_history["loitering_reported"]:
+
+            if check_loitering(
+                track_history,
                 timestamp
+            ):
+
+                events.append(
+                    create_event(
+                        track_id,
+                        "Loitering",
+                        "Person remained in nearly the same area for an extended period",
+                        timestamp
+                    )
+                )
+
+                track_history["loitering_reported"] = True
+
+        # -------------------------------------------------
+        # UNUSUAL MOVEMENT
+        # -------------------------------------------------
+
+        if check_unusual_movement(track_history):
+
+            events.append(
+                create_event(
+                    track_id,
+                    "Unusual Movement",
+                    "Person moved unusually far between observations",
+                    timestamp
+                )
             )
-
-            events.append(event)
-
-            # Report only once for this track
-            history[track_id]["restricted_zone_reported"] = True
-
-        # Update current zone status
-        history[track_id]["inside_zone"] = inside_zone
-
-        # ------------------------------------------
-        # Loitering detection
-        # ------------------------------------------
-
-        if not history[track_id]["loitering_reported"]:
-
-            event = check_loitering(
-                track_id,
-                history[track_id]["positions"],
-                history[track_id]["timestamps"]
-            )
-
-            if event:
-                events.append(event)
-
-                # Report loitering only once
-                history[track_id]["loitering_reported"] = True
-
-        # ------------------------------------------
-        # Unusual movement detection
-        # ------------------------------------------
-
-        positions = history[track_id]["positions"]
-
-        if len(positions) >= 2:
-
-            previous_position = positions[-2]
-            current_position = positions[-1]
-
-            event = check_unusual_movement(
-                track_id,
-                previous_position,
-                current_position
-            )
-
-            if event:
-                events.append(event)
 
     return events
-
-
-# --------------------------------------------------
-# BASIC TESTING
-# --------------------------------------------------
-
-if __name__ == "__main__":
-
-    print("Testing behaviour analysis...")
-
-    # Test center
-    center = calculate_center(
-        10, 20, 30, 40
-    )
-
-    print("Center:", center)
-
-    # Test distance
-    distance = calculate_distance(
-        (10, 20),
-        (20, 30)
-    )
-
-    print("Distance:", distance)
-
-    # Test restricted zone
-    test_position = (
-        (restricted_zone["x1"] + restricted_zone["x2"]) / 2,
-        (restricted_zone["y1"] + restricted_zone["y2"]) / 2
-    )
-
-    inside = is_inside_restricted_zone(
-        test_position,
-        restricted_zone
-    )
-
-    print("Inside restricted zone:", inside)
-
-    # Test event
-    event = create_event(
-        1,
-        "Test Event",
-        "Testing behaviour module",
-        5.0
-    )
-
-    print("Test event:", event)
-
-    print("Behaviour tests completed!")
